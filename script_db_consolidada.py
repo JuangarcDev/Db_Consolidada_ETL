@@ -33,7 +33,7 @@ def crear_tabla_usuario():
             Completitud VARCHAR(50),
             Municipio VARCHAR(50),
             Email VARCHAR(100) CHECK (Email ~* '^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$'),
-            Sector VARCHAR(50),
+            Zona VARCHAR(50),
             Vereda VARCHAR(100)
         );
         """
