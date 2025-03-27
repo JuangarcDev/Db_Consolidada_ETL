@@ -5,7 +5,7 @@ Script con estructura actualizada de ETL entre DB consolidada y Aplicativo de Ch
 import psycopg2
 
 # Configuración de conexión a PostgreSQL (modifica según tu entorno)
-DB_SOURCE = {
+DB_CHATBOT = {
     "dbname": "Chatbot_Backup_26032025",
     "user": "postgres",
     "password": "1234jcgg",
@@ -13,7 +13,7 @@ DB_SOURCE = {
     "port": "5432"
 }
 
-DB_TARGET = {
+DB_CONSOLIDADA = {
     "dbname": "Acc_Atencion_Usuarios_Consolidada",
     "user": "postgres",
     "password": "1234jcgg",
@@ -21,105 +21,91 @@ DB_TARGET = {
     "port": "5432"
 }
 
-def transformar_telefono(phone):
-    """Transforma el número de teléfono según las reglas definidas"""
-    if phone and phone.startswith("57") and len(phone) > 2:
-        return phone[2:]
-    elif phone and len(phone) > 2:
-        return "({}){}".format(phone[:2], phone[2:])
-    return phone
+def limpiar_telefono(numero):
+    """Elimina el prefijo 57 si está presente en el número de teléfono."""
+    return numero[2:] if numero and numero.startswith("57") else numero
 
-def migrar_datos_chatbot():
+def etl_chatbot_to_consolidada():
+    """Ejecuta la ETL desde la base de datos CHATBOT hacia la consolidada."""
     try:
         # Conectar a las bases de datos
-        conn_source = psycopg2.connect(**DB_SOURCE)
-        cursor_source = conn_source.cursor()
-        
-        conn_target = psycopg2.connect(**DB_TARGET)
-        cursor_target = conn_target.cursor()
+        conn_chatbot = psycopg2.connect(**DB_CHATBOT)
+        conn_consolidada = psycopg2.connect(**DB_CONSOLIDADA)
+        cursor_chatbot = conn_chatbot.cursor()
+        cursor_consolidada = conn_consolidada.cursor()
 
-        # Extraer datos de la fuente
-        cursor_source.execute("""
-            SELECT name, phone_number, document_type, document_number, created_at
-            FROM users
-            WHERE document_type IN ('CC', 'TI', 'CE')  -- Incluyendo más tipos de documento
-              AND LENGTH(document_number) <= 30
-        """)
-        registros = cursor_source.fetchall()
+        # 1. Extraer datos únicos de la BD CHATBOT
+        cursor_chatbot.execute("""
+            SELECT DISTINCT ON (document_number) document_type, document_number, name, phone_number, created_at
+            FROM public.users
+            WHERE LENGTH(document_number) <= 30
+            ORDER BY document_number, created_at DESC;
+        """
+        )
+        registros_chatbot = cursor_chatbot.fetchall()
         
-        total_registros = len(registros)
-        registros_transformados = []
-        omitidos = 0
+        # Obtener lista de documentos ya existentes en la consolidada
+        cursor_consolidada.execute("SELECT numero_documento FROM public.usuario;")
+        documentos_existentes = {row[0] for row in cursor_consolidada.fetchall()}
 
-        for fila in registros:
-            try:
-                # Validar que la fila tenga exactamente 5 valores
-                if len(fila) != 5:
-                    print(f"Registro omitido por estructura incorrecta: {fila}")
-                    omitidos += 1
-                    continue
-                
-                nombre, telefono, tipo_doc, cedula, fecha_registro = fila
-                
-                if not cedula:  # Si la cédula es NULL o vacía, se omite
-                    print(f"Registro omitido por falta de cédula: {fila}")
-                    omitidos += 1
-                    continue
-                
-                telefono = transformar_telefono(telefono)
-                registros_transformados.append((cedula, nombre, telefono, tipo_doc, fecha_registro, 'CHATBOT'))
+        nuevos_registros = []
+        registros_para_actualizar = []
+
+        for tipo_doc, num_doc, nombre, telefono, fecha_registro in registros_chatbot:
+            telefono_limpio = limpiar_telefono(telefono) if telefono else None
             
-            except Exception as e:
-                print(f"Error procesando fila {fila}: {e}")
-                omitidos += 1
-                continue
-
-        # Variables para estadísticas
-        nuevos_insertados = 0
-        complementados = 0
-
-        # Insertar datos en la tabla consolidada evitando duplicados y complementando información
-        for registro in registros_transformados:
-            cursor_target.execute("""
-                INSERT INTO Usuario (Cedula, Nombre, Telefono, Tipo_Documento, Fecha_Registro, Fuente)
-                VALUES (%s, %s, %s, %s, %s, %s)
-                ON CONFLICT (Cedula) DO UPDATE 
-                SET Nombre = COALESCE(EXCLUDED.Nombre, Usuario.Nombre),
-                    Telefono = COALESCE(Usuario.Telefono, EXCLUDED.Telefono),  -- Solo actualizar si estaba vacío
-                    Tipo_Documento = COALESCE(EXCLUDED.Tipo_Documento, Usuario.Tipo_Documento),
-                    Fecha_Registro = LEAST(EXCLUDED.Fecha_Registro, Usuario.Fecha_Registro),  -- Mantener la fecha más antigua
-                    Fuente = CASE 
-                                WHEN Usuario.Fuente LIKE '%CHATBOT%' THEN Usuario.Fuente 
-                                ELSE Usuario.Fuente || ', CHATBOT' 
-                             END
-                RETURNING (xmax = 0) AS inserted;
-            """, registro)
-
-            # Verificar si fue un insert o update
-            insertado = cursor_target.fetchone()[0]
-            if insertado:
-                nuevos_insertados += 1
+            if num_doc in documentos_existentes:
+                # Actualizar registros existentes
+                registros_para_actualizar.append((nombre, telefono_limpio, tipo_doc, fecha_registro, num_doc))
             else:
-                complementados += 1
+                # Insertar nuevos registros
+                nuevos_registros.append((tipo_doc, num_doc, nombre, telefono_limpio, fecha_registro, "CHATBOT"))
 
-        conn_target.commit()
+        # 2. Insertar o actualizar registros
+        if nuevos_registros:
+            cursor_consolidada.executemany("""
+                INSERT INTO public.usuario (tipo_documento, numero_documento, nombre, telefono, fecha_registro, fuente)
+                VALUES (%s, %s, %s, %s, %s, %s)
+                ON CONFLICT (numero_documento) DO UPDATE
+                SET nombre = COALESCE(EXCLUDED.nombre, usuario.nombre),
+                    telefono = COALESCE(EXCLUDED.telefono, usuario.telefono),
+                    tipo_documento = COALESCE(EXCLUDED.tipo_documento, usuario.tipo_documento),
+                    fecha_registro = LEAST(EXCLUDED.fecha_registro, usuario.fecha_registro),
+                    fuente = CASE 
+                                WHEN usuario.fuente LIKE '%%CHATBOT%%' THEN usuario.fuente
+                                ELSE usuario.fuente || ',CHATBOT'
+                             END;
+            """, nuevos_registros)
 
-        # Resumen del proceso
-        print("📊 Resumen de la Migración 📊")
-        print(f"Total registros en CHATBOT: {total_registros}")
-        print(f"Registros omitidos por error: {omitidos}")
-        print(f"Registros insertados nuevos: {nuevos_insertados}")
-        print(f"Registros complementados: {complementados}")
-        print("✅ Migración completada exitosamente.")
+        # 3. Actualizar registros existentes
+        if registros_para_actualizar:
+            for nombre, telefono, tipo_doc, fecha_registro, num_doc in registros_para_actualizar:
+                cursor_consolidada.execute("""
+                    UPDATE usuario
+                    SET nombre = COALESCE(usuario.nombre, %s),
+                        telefono = COALESCE(usuario.telefono, %s),
+                        tipo_documento = COALESCE(usuario.tipo_documento, %s),
+                        fecha_registro = LEAST(usuario.fecha_registro, %s),
+                        fuente = CASE 
+                                    WHEN usuario.fuente LIKE '%%CHATBOT%%' THEN usuario.fuente
+                                    ELSE usuario.fuente || ',CHATBOT'
+                                 END
+                    WHERE numero_documento = %s;
+                """, (nombre, telefono, tipo_doc, fecha_registro, num_doc))
 
+        # Confirmar cambios
+        conn_consolidada.commit()
+        print(f"✅ {len(nuevos_registros)} registros insertados y {len(registros_para_actualizar)} registros actualizados.")
+    
     except Exception as e:
-        print("❌ Error durante la migración:", e)
-
+        print(f"❌ Error durante la ETL: {e}")
+        conn_consolidada.rollback()
+    
     finally:
-        cursor_source.close()
-        conn_source.close()
-        cursor_target.close()
-        conn_target.close()
+        cursor_chatbot.close()
+        cursor_consolidada.close()
+        conn_chatbot.close()
+        conn_consolidada.close()
 
 if __name__ == "__main__":
-    migrar_datos_chatbot()
+    etl_chatbot_to_consolidada()
