@@ -59,7 +59,7 @@ def etl_chatbot_to_consolidada():
                 registros_para_actualizar.append((nombre, telefono_limpio, tipo_doc, fecha_registro, num_doc))
             else:
                 # Insertar nuevos registros
-                nuevos_registros.append((tipo_doc, num_doc, nombre, telefono_limpio, fecha_registro, "CHATBOT"))
+                nuevos_registros.append((tipo_doc, num_doc, nombre, telefono_limpio, fecha_registro, "Chatbot"))
 
         # 2. Insertar o actualizar registros
         if nuevos_registros:
@@ -72,8 +72,8 @@ def etl_chatbot_to_consolidada():
                     tipo_documento = COALESCE(EXCLUDED.tipo_documento, usuario.tipo_documento),
                     fecha_registro = LEAST(EXCLUDED.fecha_registro, usuario.fecha_registro),
                     fuente = CASE 
-                                WHEN usuario.fuente LIKE '%%CHATBOT%%' THEN usuario.fuente
-                                ELSE usuario.fuente || ',CHATBOT'
+                                WHEN usuario.fuente LIKE '%%Chatbot%%' THEN usuario.fuente
+                                ELSE usuario.fuente || ', Chatbot'
                              END;
             """, nuevos_registros)
 
@@ -87,8 +87,8 @@ def etl_chatbot_to_consolidada():
                         tipo_documento = COALESCE(usuario.tipo_documento, %s),
                         fecha_registro = LEAST(usuario.fecha_registro, %s),
                         fuente = CASE 
-                                    WHEN usuario.fuente LIKE '%%CHATBOT%%' THEN usuario.fuente
-                                    ELSE usuario.fuente || ',CHATBOT'
+                                    WHEN usuario.fuente LIKE '%%Chatbot%%' THEN usuario.fuente
+                                    ELSE usuario.fuente || ', Chatbot'
                                  END
                     WHERE numero_documento = %s;
                 """, (nombre, telefono, tipo_doc, fecha_registro, num_doc))
