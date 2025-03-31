@@ -19,8 +19,12 @@ DB_TARGET = {
 
 LOG_FILE = "informe_etl_tucatastro.txt"
 
+# Limpiar el archivo al inicio de la ejecución
+with open(LOG_FILE, "w", encoding="utf-8") as log:
+    log.write("")
+
 def log_message(message):
-    with open(LOG_FILE, "a", encoding="utf-8") as log:
+    with open(LOG_FILE, "a", encoding="utf-8") as log:  # "a" para agregar mensajes después de limpiar
         log.write(message + "\n")
     print(message)
 
@@ -182,7 +186,7 @@ def cargar_datos(usuarios):
                 # Insertar nuevos registros
                 nuevos_registros.append((tipo_doc, num_doc, nombre, fecha_registro, municipio, zona, vereda))
 
-                
+
         # Insertar nuevos registros
         if nuevos_registros:
             cur.executemany("""
