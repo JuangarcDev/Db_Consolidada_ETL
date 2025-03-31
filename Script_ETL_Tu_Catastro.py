@@ -47,23 +47,27 @@ def extraer_interesados(tramites):
         conn = psycopg2.connect(**DB_SOURCE)
         cur = conn.cursor()
         query = """
-        SELECT interesado, predio 
+        SELECT DISTINCT interesado, predio 
         FROM data.relacion_predio_interesado 
-        WHERE tramite IN %s ORDER BY id ASC;
+        WHERE tramite IN %s;
         """
         cur.execute(query, (tuple(tramites),))
 
         interesados_predios = {}
+        solo_interesados_set = set()  # Usamos un set para evitar duplicados
+
         for interesado, predio in cur.fetchall():
-            if interesado and predio:
-                if interesado not in interesados_predios:
-                    interesados_predios[interesado] = []
-                interesados_predios[interesado].append(predio)        
+            if interesado:
+                solo_interesados_set.add(interesado)  # Almacena solo IDs únicos de interesados
+                if predio:
+                    if interesado not in interesados_predios:
+                        interesados_predios[interesado] = []
+                    interesados_predios[interesado].append(predio)         
         
         cur.close()
         conn.close()
 
-        solo_interesados = list(interesados_predios.keys())
+        solo_interesados = list(solo_interesados_set)
 
         log_message(f"[INFO] Se encontraron {len(interesados_predios)} interesados con números prediales.")
         log_message(f"[DEBUG] Muestra de interesados con predios: {list(interesados_predios.items())[:5]}")  # Muestra primeros 5 registros
@@ -105,6 +109,10 @@ def transformar_datos(datos, relacion_predios):
     for row in datos:
         try:
             id_universal, tipo_documento, documento_identidad, p_nombre, s_nombre, p_apellido, s_apellido, fecha_registro = row
+            
+            if documento_identidad.isdigit() and int(documento_identidad) ==0:
+                log_message(f"[WARNING] Documentos Ignorado: {documento_identidad}")
+            
             if not tipo_documento or not documento_identidad:
                 log_message(f"[WARNING] Registro omitido por valores nulos: {row}")
                 continue  # Omitir registros con valores nulos
@@ -149,24 +157,69 @@ def cargar_datos(usuarios):
         log_message("\n[INFO] Cargando datos en la base de datos destino...")
         conn = psycopg2.connect(**DB_TARGET)
         cur = conn.cursor()
-        query = """
-        INSERT INTO usuario (tipo_documento, numero_documento, nombre, fecha_registro, fuente, municipio, zona, vereda) 
-        VALUES (%s, %s, %s, %s, 'Tu_Catastro_Tramites', %s, %s, %s) 
-        ON CONFLICT (numero_documento)
-        DO UPDATE SET
-            municipio = COALESCE(EXCLUDED.municipio, usuario.municipio),
-            zona = COALESCE(EXCLUDED.zona, usuario.zona),
-            vereda = COALESCE(EXCLUDED.vereda, usuario.vereda),
-            fuente = CASE 
-                        WHEN usuario.fuente LIKE '%%Tu_Catastro_Tramites%%' THEN usuario.fuente
-                        ELSE usuario.fuente || ', Tu_Catastro_Tramites'
-                        END;
-        """
-        cur.executemany(query, usuarios)
+
+        # Obtener el total de registros presentes en la DB Objetivo antes de cargar los registros
+        cur.execute("SELECT COUNT(*) FROM usuario;")
+        total_inicial = cur.fetchone()[0]
+
+        # Obtener lista de documentos ya existentes en la DB objetivo
+        cur.execute("SELECT numero_documento FROM usuario;")
+        documentos_existentes = {row[0] for row in cur.fetchall()}
+
+        nuevos_registros = []
+        registros_para_actualizar = []
+
+        for tipo_doc, num_doc, nombre, fecha_registro, municipio, zona, vereda in usuarios:
+            # Omitir documentos que sean solo ceros
+            if num_doc.isdigit() and int(num_doc) == 0:
+                log_message(f"[WARNING] Documento ignorado por ser solo ceros: {num_doc}")
+                continue  
+
+            if num_doc in documentos_existentes:
+                # Actualizar registros existentes
+                registros_para_actualizar.append((municipio, zona, vereda, num_doc))
+            else:
+                # Insertar nuevos registros
+                nuevos_registros.append((tipo_doc, num_doc, nombre, fecha_registro, municipio, zona, vereda))
+
+                
+        # Insertar nuevos registros
+        if nuevos_registros:
+            cur.executemany("""
+                INSERT INTO usuario (tipo_documento, numero_documento, nombre, fecha_registro, fuente, municipio, zona, vereda)
+                VALUES (%s, %s, %s, %s, 'Tu_Catastro_Tramites', %s, %s, %s);
+            """, nuevos_registros)
+        
+        # Actualizar registros existentes
+        if registros_para_actualizar:
+            for municipio, zona, vereda, num_doc in registros_para_actualizar:
+                cur.execute("""
+                    UPDATE usuario
+                    SET municipio = COALESCE(usuario.municipio, %s),
+                        zona = COALESCE(usuario.zona, %s),
+                        vereda = COALESCE(usuario.vereda, %s),
+                        fuente = CASE 
+                                    WHEN usuario.fuente LIKE '%%Tu_Catastro_Tramites%%' THEN usuario.fuente
+                                    ELSE usuario.fuente || ', Tu_Catastro_Tramites'
+                                 END
+                    WHERE numero_documento = %s;
+                """, (municipio, zona, vereda, num_doc))
+
+        # Confirmar cambios
         conn.commit()
+        
+        # Obtener el total de registros después de la carga
+        cur.execute("SELECT COUNT(*) FROM usuario;")
+        total_final = cur.fetchone()[0]
+        
+        # Cerrar conexión
         cur.close()
         conn.close()
-        log_message(f"[SUCCESS] Se insertaron {len(usuarios)} registros correctamente.")
+        
+        log_message(f"[SUCCESS] Registros iniciales: {total_inicial}")
+        log_message(f"[SUCCESS] Registros insertados: {len(nuevos_registros)}")
+        log_message(f"[SUCCESS] Registros actualizados: {len(registros_para_actualizar)}")
+        log_message(f"[SUCCESS] Registros finales: {total_final}")
     except Exception as e:
         log_message(f"[ERROR] Error cargando datos: {e}")
 

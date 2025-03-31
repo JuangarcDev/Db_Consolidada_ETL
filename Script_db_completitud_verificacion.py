@@ -99,6 +99,37 @@ def limpiar_y_estandarizar():
                     WHERE Id = %s;
                 """, (nuevo_nombre, id_usuario))
                 registros_actualizados += 1
+
+        # Validar completitud de los registros
+        cursor.execute("SELECT * FROM Usuario;")
+        columnas = [desc[0].lower() for desc in cursor.description]  # Convertir nombres a minúsculas
+        registros = cursor.fetchall()
+
+        for registro in registros:
+            id_usuario = registro[0]
+            completitud_actual = registro[columnas.index("completitud")] if "completitud" in columnas else None
+            
+            # Excluir las columnas Completitud y Numero_Documento_Limpio para validar si hay valores nulos
+            valores = [registro[i] for i in range(len(columnas)) if columnas[i] not in ["completitud", "numero_documento_limpio"]]
+            
+            if all(valores):  # Si todos los atributos son diferentes de NULL
+                nueva_completitud = "Completo"
+            else:
+                nueva_completitud = "Incompleto"
+
+            if completitud_actual:
+                if completitud_actual == "Incompleto" and nueva_completitud == "Completo":
+                    nueva_completitud = "Completo"  # Reemplazar completamente
+                elif completitud_actual != "Completo" and nueva_completitud == "Incompleto":
+                    nueva_completitud = f"Incompleto, {completitud_actual}"  # Agregar "Incompleto" al inicio
+
+            if nueva_completitud != completitud_actual:
+                cursor.execute("""
+                    UPDATE Usuario
+                    SET Completitud = %s
+                    WHERE Id = %s;
+                """, (nueva_completitud, id_usuario))
+                registros_actualizados += 1
         
         conn.commit()
         
